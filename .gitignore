@@ -131,4 +131,5 @@ dmypy.json
 # Project
 .old
 .tests
+test*
 *.txt
