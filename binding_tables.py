@@ -86,14 +86,9 @@ HID_KEY_CODES = {
     'page_down': 0x4E,
     'caps_lock': 0x39,
     'shift': 0xE1,
-    'shift_l': 0xE1,  # shift
-    'shift_r': 0xE1,  # shift
     'ctrl': 0xE0,
-    'ctrl_l': 0xE0,  # ctrl
-    'ctrl_r': 0xE0,  # ctrl
     'cmd': 0xE3,
     'alt': 0xE2,
-    'alt_l': 0xE2,  # alt
     'alt_gr': 0xE6,
     'space': 0x2C,
     'menu': 0x65,
@@ -104,3 +99,18 @@ HID_KEY_CODES = {
     'none': None,
     None: None,
 }
+
+HID_KEY_CODES.update({
+    'shift_l': HID_KEY_CODES['shift'],
+    'shift_left': HID_KEY_CODES['shift'],
+    'shift_r': HID_KEY_CODES['shift'],
+    'shift_right': HID_KEY_CODES['shift'],
+
+    'ctrl_l': HID_KEY_CODES['ctrl'],
+    'ctrl_left': HID_KEY_CODES['ctrl'],
+    'ctrl_r': HID_KEY_CODES['ctrl'],
+    'ctrl_right': HID_KEY_CODES['ctrl'],
+
+    'alt_l': HID_KEY_CODES['alt'],
+    'alt_left': HID_KEY_CODES['alt']
+})

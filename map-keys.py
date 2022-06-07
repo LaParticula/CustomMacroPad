@@ -3,8 +3,8 @@ import os
 import subprocess
 import platform
 import argparse
-if platform.system() == 'Windows':
-    import win32api
+import string
+import json
 
 # Pynput
 from pynput.keyboard import Listener, Key
@@ -15,26 +15,55 @@ from binding_tables import HID_KEY_CODES, BUTTON_NAMES
 
 class GetKeys(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
-        pad_btn, key = values
-        key = key.lower()
+        values = self._validate_and_normalize_input(*values)
+        list_ = getattr(namespace, self.dest) or []
+        list_.append(values)
+        setattr(namespace, self.dest, list_)
+
+    def _validate_and_normalize_input(self, button, key=None):
         try:
-            pad_btn = BUTTON_NAMES[int(pad_btn)]
+            button = BUTTON_NAMES[int(button)]
         except ValueError:
-            pad_btn = pad_btn.lower()
+            button = button.lower().replace(' ', '_')
         except KeyError:
             pass
 
-        if pad_btn not in BUTTON_NAMES.values():
+        if button not in BUTTON_NAMES.values():
             msg = f'{self.metavar[0]} does not match any existing button.'
             raise argparse.ArgumentError(self, msg)
 
-        if key not in HID_KEY_CODES:
-            msg = f'{self.metavar[1]} does not match any existing key.'
-            raise argparse.ArgumentError(self, msg)
+        if key:
+            key = key.lower().replace(' ', '_')
+            if key not in HID_KEY_CODES:
+                msg = f'{self.metavar[1]} does not match any existing key.'
+                raise argparse.ArgumentError(self, msg)
+            return (button, key)
 
-        bindings = getattr(namespace, self.dest) or []
-        bindings.append((pad_btn, key))
-        setattr(namespace, self.dest, bindings)
+        return button
+
+
+class CustomHelpFormatter(argparse.HelpFormatter):
+    def _format_action_invocation(self, action):
+        if not action.option_strings:
+            default = self._get_default_metavar_for_positional(action)
+            metavar, = self._metavar_formatter(action, default)(1)
+            return metavar
+        else:
+            parts = []
+            # if the Optional doesn't take a value, format is:
+            #    -s, --long
+            if action.nargs == 0:
+                parts.extend(action.option_strings)
+
+            # if the Optional takes a value, format is:
+            #    -s, --long ARGS
+            else:
+                default = self._get_default_metavar_for_optional(action)
+                args_string = self._format_args(action, default)
+                parts = action.option_strings[:]
+                parts[-1] += ' ' + args_string
+
+            return ', '.join(parts)
 
 
 def get_root(request=True):
@@ -54,89 +83,152 @@ def get_root(request=True):
         return True
 
 
-def get_board_path(retry=False):
+def get_board_path():
     if platform.system() == 'Linux':
-        has_root = get_root(request=False)
-
+        cmd = 'findmnt -lo SOURCE,LABEL,TARGET | grep CIRCUITPY'
+        output = subprocess.getoutput(cmd)
         #  sample: '/dev/sdc1             /media/$USER/CIRCUITPY'
         #  sample: '/dev/sdd1   CIRCUITPY /media/$USER/CIRCUITPY'
-        mount_data = subprocess.getoutput(
-            'findmnt -lo SOURCE,LABEL,TARGET | grep CIRCUITPY'
-        )
-        board_path = None
-        if mount_data:
-            folders_to_unmount = []
-            for data_line in mount_data.split('\n'):
-                new_data = [
-                    data
-                    for data in data_line.strip().split(' ')
-                    if data
-                ]
-                if len(new_data) == 3:
-                    board_path = new_data[-1]
-                elif not retry:
-                    folders_to_unmount.append(new_data[-1])
+        for output_line in output.split('\n'):
+            new_data = [
+                data
+                for data in output_line.strip().split(' ')
+                if data
+            ]
+            if len(new_data) == 3:
+                board_path = new_data[-1] + '/'
+                return board_path
 
-            if folders_to_unmount:
-                print('There\'re folders mounted on disconnected devices.')
-                for path in folders_to_unmount:
-                    print(' '*4 + path)
-                print('Unmounting them.')
-                has_root = get_root()
-            for path in folders_to_unmount:
-                if not has_root:
-                    break
-                cmd = f'sudo umount {path}'
-                exit_code, output = subprocess.getstatusoutput(cmd)
-                if has_root and exit_code == 0:
-                    folders_to_unmount.remove(path)
-                    continue
-                else:
-                    print(output)
-
-        if board_path:
-            return board_path
-
+        cmd = 'lsblk -o PATH,LABEL | grep CIRCUITPY'
+        output = subprocess.getoutput(cmd)
         #  sample: '/dev/sdc1   CIRCUITPY'
-        board_data = subprocess.getoutput(
-            'lsblk -o PATH,LABEL | grep CIRCUITPY'
-        )
-        if board_data:
-            board_path = board_data.strip().split(' ', 1)[0]
-            os.system('mkdir -p CIRCUITPY')
-            print('Mounting Raspberry PI Pico file system.')
-            cmd = f'sudo mount {board_path} CIRCUITPY'
-            has_root = get_root()
-            if not has_root:
-                print('Root access is needed to mount a file system.')
-                print(f'You can mount it manually with "{cmd}"')
-                return
-            exit_code, output = subprocess.getstatusoutput(cmd)
-            if exit_code != 0:
-                print(output)
-                return
-            else:
-                return get_board_path(retry=True)
+        if not output:
+            print('No programmable board with a file system was detected.')
+            return
+        device_path = output.strip().rsplit(' ')[0]
+
+        cmd = f'udisksctl mount -b {device_path}'
+        exit_code, output = subprocess.getstatusoutput(cmd)
+        # sample: 'Mounted /dev/sdc1 at /media/$USER/CIRCUITPY.'
+        if exit_code == 0:
+            board_path = output.rsplit(' ', 1)[1][:-1] + '/'
+            return board_path
         else:
-            print('Raspberry PI Pico is not connected.')
+            print(output)
+            return
+
+    elif platform.system() == 'Windows':
+        import win32api
+        #  sample: ['F']
+        partition_letter = [
+            char
+            for char in string.ascii_uppercase
+            if (
+                os.path.exists(char + ':/') and
+                win32api.GetVolumeInformation(char + ':/')[0] == 'CIRCUITPY'
+            )
+        ]
+        if not partition_letter:
+            print(
+                'No programmable board with a mounted ' +
+                'file system was detected.'
+            )
+            return
+        board_path = partition_letter[0] + ':\\'
+        return board_path
+    else:
+        print('Board path auto-detect is not supported for this OS.')
+        print('You must specify it with "--path PATH".')
+        return
+
+
+def print_bindings(bindings):
+    longest_button_length = 0
+    for button in bindings.keys():
+        if len(button) > longest_button_length:
+            longest_button_length = len(button)
+
+    indentation = ' ' * 4
+    print()
+    print(indentation + 'BTN' + ' ' * (longest_button_length) + 'KEY')
+    print(indentation + '')
+    for button, key in bindings.items():
+        if key:
+            key = [
+                key_str
+                for key_str in HID_KEY_CODES.keys()
+                if key == HID_KEY_CODES[key_str]
+            ][0].replace('_', ' ')
+        else:
+            key = 'Unbinded'
+        spaces = ' ' * (longest_button_length - len(button)) + '   '
+        print(indentation + button + spaces + key)
+    print()
+
 
 def main():
     args = arg_parser.parse_args()
-    print(get_board_path())
-    #  print(vars(args))
+    if args.path and os.path.exists(args.path):
+        board_path = args.path
+    else:
+        board_path = get_board_path()
+        if not board_path:
+            return
+
+    config_file_path = board_path + 'bindings.json'
+
+    if os.path.exists(config_file_path):
+        with open(config_file_path, 'r') as fp:
+            bindings = json.load(fp)
+    else:
+        bindings = {
+            button: None
+            for button in BUTTON_NAMES.values()
+        }
+
+    if args.list:
+        print_bindings(bindings)
+        return
+
+    if args.bindings:
+        for button, key in args.bindings:
+            bindings[button] = HID_KEY_CODES[key]
+
+    if args.bindings_to_remove:
+        for button in args.bindings_to_remove:
+            bindings[button] = None
+
+    if not args.dry_run:
+        with open(config_file_path, 'w') as fp:
+            json.dump(bindings, fp, indent=4)
 
 
 if __name__ == '__main__':
     arg_parser = argparse.ArgumentParser(
-        description='Bind keyboard keys to Raspberry PI Pico\'s GPIO pins.'
+        description="""\
+            Create a config file of bindings between\
+            virtual buttons and keyboard HID codes\
+            and save it on programmable boards with\
+            a mountable file system,\
+            like MicroPython or CircuitPython boards.
+        """,
+        formatter_class=CustomHelpFormatter
     )
     arg_parser.add_argument(
-        '-b',
+        '-b', '--bind',
         action=GetKeys,
         nargs=2,
-        metavar=('PAD_BTN', 'KEY'),
+        metavar=('BTN', 'KEY'),
         dest='bindings',
         help='Bind a pad button with a keyboard key.'
+    )
+    arg_parser.add_argument(
+        '-r', '--remove',
+        action=GetKeys,
+        nargs=1,
+        metavar='BTN',
+        dest='bindings_to_remove',
+        help='Remove a pad button binding.'
     )
     arg_parser.add_argument(
         '-l', '--list',
@@ -144,8 +236,13 @@ if __name__ == '__main__':
         help='List all bindings.'
     )
     arg_parser.add_argument(
-        '-s', '--save',
+        '-d', '--dry-run',
         action='store_true',
-        help='Save the bindings on disk.'
+        help='Execute without writing on board disk.'
+    )
+    arg_parser.add_argument(
+        '-p', '--path',
+        metavar='PATH',
+        help='Specify a path to the mounted board.'
     )
     main()
