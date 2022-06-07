@@ -84,7 +84,7 @@ def get_root(request=True):
 
 
 def get_board_path():
-    if platform.system() == 'Linux':
+    if OPERATING_SYSTEM == 'Linux':
         cmd = 'findmnt -lo SOURCE,LABEL,TARGET | grep CIRCUITPY'
         output = subprocess.getoutput(cmd)
         #  sample: '/dev/sdc1             /media/$USER/CIRCUITPY'
@@ -117,7 +117,7 @@ def get_board_path():
             print(output)
             return
 
-    elif platform.system() == 'Windows':
+    elif OPERATING_SYSTEM == 'Windows':
         import win32api
         #  sample: ['F']
         partition_letter = [
@@ -166,9 +166,46 @@ def print_bindings(bindings):
     print()
 
 
+def get_bindings(config_file_path):
+    if os.path.exists(config_file_path):
+        with open(config_file_path, 'r') as fp:
+            bindings = json.load(fp)
+
+        for button in bindings.copy().keys():
+            if button not in BUTTON_NAMES.values():
+                del bindings[button]
+
+        for button in BUTTON_NAMES.values():
+            if button not in bindings:
+                bindings[button] = None
+
+    else:
+        bindings = {
+            button: None
+            for button in BUTTON_NAMES.values()
+        }
+
+    return bindings
+
+
+def validate_path_type(path):
+    if OPERATING_SYSTEM == 'Linux':
+        if not path.endswith('/'):
+            path += '/'
+    elif OPERATING_SYSTEM == 'Windows':
+        if not path.endswith('\\'):
+            path += '\\'
+
+    if not os.path.exists(path):
+        msg = 'Specified path does not exists.'
+        raise argparse.ArgumentTypeError(msg)
+
+    return path
+
+
 def main():
     args = arg_parser.parse_args()
-    if args.path and os.path.exists(args.path):
+    if args.path:
         board_path = args.path
     else:
         board_path = get_board_path()
@@ -176,19 +213,7 @@ def main():
             return
 
     config_file_path = board_path + 'bindings.json'
-
-    if os.path.exists(config_file_path):
-        with open(config_file_path, 'r') as fp:
-            bindings = json.load(fp)
-    else:
-        bindings = {
-            button: None
-            for button in BUTTON_NAMES.values()
-        }
-
-    if args.list:
-        print_bindings(bindings)
-        return
+    bindings = get_bindings(config_file_path)
 
     if args.bindings:
         for button, key in args.bindings:
@@ -202,8 +227,13 @@ def main():
         with open(config_file_path, 'w') as fp:
             json.dump(bindings, fp, indent=4)
 
+    if args.list:
+        print_bindings(bindings)
 
-if __name__ == '__main__':
+
+def setup():
+    global OPERATING_SYSTEM, arg_parser
+    OPERATING_SYSTEM = platform.system()
     arg_parser = argparse.ArgumentParser(
         description="""\
             Create a config file of bindings between\
@@ -243,6 +273,11 @@ if __name__ == '__main__':
     arg_parser.add_argument(
         '-p', '--path',
         metavar='PATH',
+        type=validate_path_type,
         help='Specify a path to the mounted board.'
     )
+
+
+if __name__ == '__main__':
+    setup()
     main()
