@@ -5,6 +5,8 @@ import platform
 import argparse
 import string
 import json
+import curses
+import time
 
 # Pynput
 from pynput.keyboard import Listener, Key
@@ -142,16 +144,8 @@ def get_board_path():
         return
 
 
-def print_bindings(bindings):
-    longest_button_length = 0
-    for button in bindings.keys():
-        if len(button) > longest_button_length:
-            longest_button_length = len(button)
-
-    indentation = ' ' * 4
-    print()
-    print(indentation + 'BTN' + ' ' * (longest_button_length) + 'KEY')
-    print(indentation + '')
+def format_bindings(bindings):
+    formatted_bindings = bindings.copy()
     for button, key in bindings.items():
         if key:
             key = [
@@ -161,7 +155,20 @@ def print_bindings(bindings):
             ][0].replace('_', ' ')
         else:
             key = 'Unbinded'
-        spaces = ' ' * (longest_button_length - len(button)) + '   '
+        formatted_bindings[button] = key
+
+    return formatted_bindings
+
+
+def print_bindings(bindings):
+    bindings = format_bindings(bindings)
+    largest_btn_len = len(max(bindings.keys(), key=len))
+    indentation = ' ' * 4
+    print()
+    print(indentation + 'BTN' + ' ' * largest_btn_len + 'KEY')
+    print(indentation + '')
+    for button, key in bindings.items():
+        spaces = ' ' * (largest_btn_len - len(button)) + '   '
         print(indentation + button + spaces + key)
     print()
 
@@ -203,6 +210,184 @@ def validate_path_type(path):
     return path
 
 
+def on_press(key):
+    global pressed_key
+    if not pressed_key:
+        if isinstance(key, Key):
+            pressed_key = key.name
+        elif key:
+            pressed_key = key.char
+
+
+def on_release(key):
+    global released_key
+    if not released_key:
+        if isinstance(key, Key):
+            released_key = key.name
+        elif key:
+            released_key = key.char
+
+
+def custom_curses_wrapper(func, *args, **kwargs):
+    try:
+        key_listener = Listener(on_press, on_release)
+        key_listener.start()
+        stdscr = curses.initscr()
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(True)
+        stdscr.refresh()
+        return func(stdscr, *args, **kwargs)
+    finally:
+        if 'key_listener' in locals():
+            key_listener.stop()
+        if 'stdscr' in locals():
+            stdscr.keypad(False)
+            curses.echo()
+            curses.nocbreak()
+            curses.endwin()
+
+
+class BindingWindow:
+    def __init__(self, pos, key_pos, button, key):
+        self.button = button
+        self.key = key
+        self.key_pos = key_pos
+        self.win = curses.newwin(1, curses.COLS - 4, *pos)
+        self.win.addstr(0, 1, button)
+        self.change_key(key)
+
+    def change_key(self, key, focus=False):
+        self.win.addstr(0, self.key_pos, key)
+        self.win.clrtoeol()
+        if focus:
+            self.focus(True)
+        self.win.refresh()
+
+    def focus(self, focus):
+        if focus:
+            self.win.chgat(0, 0, curses.A_REVERSE)
+        else:
+            self.win.chgat(0, 0, curses.A_NORMAL)
+        self.win.refresh()
+
+
+class BindingWinManager:
+    def __init__(self, start_pos, bindings, config_file_path, dry_run):
+        self.current_pos = list(start_pos)
+        self.current_win_index = 0
+        self.is_binding = False
+        self.prev_key = None
+        self.bindings = bindings
+        self.dry_run = dry_run
+        self.config_file_path = config_file_path
+        self.key_pos = len(max(bindings.keys(), key=len)) + 6
+
+        self.bind_wins = []
+        for button, key in format_bindings(bindings).items():
+            win = BindingWindow(
+                self.current_pos, self.key_pos, button, key
+            )
+            self.current_pos[0] += 1
+            self.bind_wins.append(win)
+
+        self.bind_wins[0].focus(True)
+
+    def _get_current_window(self):
+        return self.bind_wins[self.current_win_index]
+
+    def enter_binding_mode(self):
+        bind_win = self._get_current_window()
+        bind_win.change_key('<Press any key>', focus=True)
+        self.is_binding = True
+
+    def exit_binding_mode(self):
+        bind_win = self._get_current_window()
+        bind_win.change_key(bind_win.key, focus=True)
+        self.is_binding = False
+
+    def rebind(self, key):
+        self.is_binding = False
+        bind_win = self._get_current_window()
+        bind_win.change_key(key, focus=True)
+        bind_win.key = key
+        self.bindings[bind_win.button] = HID_KEY_CODES[key]
+        if not self.dry_run:
+            with open(self.config_file_path, 'w') as fp:
+                json.dump(self.bindings, fp, indent=4)
+
+    def move_vertically(self, direction):
+        self._get_current_window().focus(False)
+        if direction == 'up':
+            if self.current_win_index == 0:
+                self.current_win_index = len(self.bind_wins) - 1
+            else:
+                self.current_win_index -= 1
+        elif direction == 'down':
+            if self.current_win_index == len(self.bind_wins) - 1:
+                self.current_win_index = 0
+            else:
+                self.current_win_index += 1
+        self._get_current_window().focus(True)
+
+
+def run_interactive_mode(stdscr, bindings, config_file_path, dry_run):
+    global pressed_key, released_key
+
+    stdscr = curses.initscr()
+    curses.curs_set(0)
+    top_msg = 'Use arrow keys to navigate, press Enter to bind.'
+    stdscr.addstr(1, 2, top_msg)
+
+    largest_btn = len(max(bindings, key=len))
+    stdscr.addstr(3, 3, 'Buttons', curses.A_BOLD)
+    stdscr.addstr(3, 8 + largest_btn, 'Keys', curses.A_BOLD)
+    stdscr.refresh()
+    binding_win_manager = BindingWinManager(
+        (5, 2), bindings, config_file_path, dry_run
+    )
+
+    last_esc_time = None
+    canceled_binding = False
+    while True:
+        pressed_key = released_key = None
+
+        while not pressed_key:
+            time.sleep(0.001)
+
+        if binding_win_manager.is_binding:
+            if pressed_key == 'esc':
+                last_esc_time = time.time()
+                while released_key != 'esc':
+                    released_key = None
+                    while not released_key:
+                        if time.time() - last_esc_time > 1:
+                            released_key = 'esc'
+                            canceled_binding = True
+                released_key = None
+                if canceled_binding:
+                    canceled_binding = False
+                    binding_win_manager.exit_binding_mode()
+                    while not released_key:
+                        time.sleep(0.001)
+                    continue
+            binding_win_manager.rebind(pressed_key)
+
+        elif pressed_key in ('enter', 'space'):
+            binding_win_manager.enter_binding_mode()
+
+        elif pressed_key in ('esc', 'q'):
+            break
+
+        elif pressed_key in ('up', 'k'):
+            binding_win_manager.move_vertically('up')
+
+        elif pressed_key in ('down', 'j'):
+            binding_win_manager.move_vertically('down')
+
+    curses.flushinp()
+
+
 def main():
     args = arg_parser.parse_args()
     if args.path:
@@ -212,18 +397,27 @@ def main():
         if not board_path:
             return
 
+    write = False
     config_file_path = board_path + 'bindings.json'
     bindings = get_bindings(config_file_path)
+
+    if args.interactive:
+        custom_curses_wrapper(
+            run_interactive_mode, bindings,
+            config_file_path, args.dry_run
+        )
 
     if args.bindings:
         for button, key in args.bindings:
             bindings[button] = HID_KEY_CODES[key]
+        write = True
 
     if args.bindings_to_remove:
         for button in args.bindings_to_remove:
             bindings[button] = None
+        write = True
 
-    if not args.dry_run:
+    if write and not args.dry_run:
         with open(config_file_path, 'w') as fp:
             json.dump(bindings, fp, indent=4)
 
@@ -232,8 +426,10 @@ def main():
 
 
 def setup():
-    global OPERATING_SYSTEM, arg_parser
+    global OPERATING_SYSTEM, arg_parser, released_key, pressed_key
     OPERATING_SYSTEM = platform.system()
+    pressed_key = None
+    released_key = None
     arg_parser = argparse.ArgumentParser(
         description="""\
             Create a config file of bindings between\
@@ -245,12 +441,17 @@ def setup():
         formatter_class=CustomHelpFormatter
     )
     arg_parser.add_argument(
+        '-i', '--interactive',
+        action='store_true',
+        help='start in interactive binding mode'
+    )
+    arg_parser.add_argument(
         '-b', '--bind',
         action=GetKeys,
         nargs=2,
         metavar=('BTN', 'KEY'),
         dest='bindings',
-        help='Bind a pad button with a keyboard key.'
+        help='bind a pad button with a keyboard key'
     )
     arg_parser.add_argument(
         '-r', '--remove',
@@ -258,23 +459,23 @@ def setup():
         nargs=1,
         metavar='BTN',
         dest='bindings_to_remove',
-        help='Remove a pad button binding.'
+        help='remove a pad button binding'
     )
     arg_parser.add_argument(
         '-l', '--list',
         action='store_true',
-        help='List all bindings.'
+        help='list all bindings'
     )
     arg_parser.add_argument(
         '-d', '--dry-run',
         action='store_true',
-        help='Execute without writing on board disk.'
+        help='execute without writing on board disk'
     )
     arg_parser.add_argument(
         '-p', '--path',
         metavar='PATH',
         type=validate_path_type,
-        help='Specify a path to the mounted board.'
+        help='specify a path to the mounted board'
     )
 
 
