@@ -8,6 +8,13 @@ import json
 import curses
 import time
 
+# Pyserial
+import serial
+if platform.system() == 'Windows':
+    import serial.tools.list_ports_windows
+else:
+    import serial.tools.list_ports_linux
+
 # Pynput
 from pynput.keyboard import Listener, Key
 
@@ -15,11 +22,21 @@ from pynput.keyboard import Listener, Key
 from binding_tables import HID_KEY_CODES, BUTTON_NAMES
 
 
+class BoardException(Exception):
+    def print(self):
+        for arg in self.args:
+            print(arg)
+
+
 class GetKeys(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
+        import ipdb; ipdb.set_trace()  # NOQA
         values = self._validate_and_normalize_input(*values)
         list_ = getattr(namespace, self.dest) or []
-        list_.append(values)
+        if self.dest == 'bindings_to_remove':
+            list_.extend(values)
+        else:
+            list_.append(values)
         setattr(namespace, self.dest, list_)
 
     def _validate_and_normalize_input(self, button, key=None):
@@ -105,19 +122,20 @@ def get_board_path():
         output = subprocess.getoutput(cmd)
         #  sample: '/dev/sdc1   CIRCUITPY'
         if not output:
-            print('No programmable board with a file system was detected.')
-            return
+            raise BoardException(
+                'No programmable board with ' +
+                'a file system was detected.'
+            )
         device_path = output.strip().rsplit(' ')[0]
 
         cmd = f'udisksctl mount -b {device_path}'
         exit_code, output = subprocess.getstatusoutput(cmd)
         # sample: 'Mounted /dev/sdc1 at /media/$USER/CIRCUITPY.'
-        if exit_code == 0:
-            board_path = output.rsplit(' ', 1)[1][:-1] + '/'
-            return board_path
-        else:
-            print(output)
-            return
+        if exit_code != 0:
+            raise BoardException(output)
+
+        board_path = output.rsplit(' ', 1)[1][:-1] + '/'
+        return board_path
 
     elif OPERATING_SYSTEM == 'Windows':
         import win32api
@@ -131,17 +149,17 @@ def get_board_path():
             )
         ]
         if not partition_letter:
-            print(
+            raise BoardException(
                 'No programmable board with a mounted ' +
                 'file system was detected.'
             )
-            return
         board_path = partition_letter[0] + ':\\'
         return board_path
     else:
-        print('Board path auto-detect is not supported for this OS.')
-        print('You must specify it with "--path PATH".')
-        return
+        raise BoardException(
+            'Board path auto-detect is not supported for this OS.',
+            'You must specify it with "--path PATH".'
+        )
 
 
 def format_bindings(bindings):
@@ -210,6 +228,26 @@ def validate_path_type(path):
     return path
 
 
+def validate_port_type(port):
+    if OPERATING_SYSTEM == 'Linux':
+        ports = serial.tools.list_ports_linux.comports()
+    elif OPERATING_SYSTEM == 'Windows':
+        ports = serial.tools.list_ports_windows.comports()
+    else:
+        raise BoardException(
+            'This operating system does not support ' +
+            'automatic port detection.',
+            'You must specify it with "--port".'
+        )
+    ports = [port.device for port in sorted(ports)]
+
+    if port not in ports:
+        msg = 'Specified port is not found.'
+        raise argparse.ArgumentTypeError(msg)
+
+    return port
+
+
 def on_press(key):
     global pressed_key
     if not pressed_key:
@@ -246,6 +284,7 @@ def custom_curses_wrapper(func, *args, **kwargs):
             curses.echo()
             curses.nocbreak()
             curses.endwin()
+        curses.flushinp()
 
 
 class BindingWindow:
@@ -273,14 +312,12 @@ class BindingWindow:
 
 
 class BindingWinManager:
-    def __init__(self, start_pos, bindings, config_file_path, dry_run):
+    def __init__(self, start_pos, bindings):
         self.current_pos = list(start_pos)
         self.current_win_index = 0
         self.is_binding = False
         self.prev_key = None
         self.bindings = bindings
-        self.dry_run = dry_run
-        self.config_file_path = config_file_path
         self.key_pos = len(max(bindings.keys(), key=len)) + 6
 
         self.bind_wins = []
@@ -312,9 +349,10 @@ class BindingWinManager:
         bind_win.change_key(key, focus=True)
         bind_win.key = key
         self.bindings[bind_win.button] = HID_KEY_CODES[key]
-        if not self.dry_run:
-            with open(self.config_file_path, 'w') as fp:
-                json.dump(self.bindings, fp, indent=4)
+        if not args.dry_run:
+            write_bindings(self.bindings)
+            if args.reload:
+                reload_bindings()
 
     def move_vertically(self, direction):
         self._get_current_window().focus(False)
@@ -331,7 +369,7 @@ class BindingWinManager:
         self._get_current_window().focus(True)
 
 
-def run_interactive_mode(stdscr, bindings, config_file_path, dry_run):
+def run_interactive_mode(stdscr, bindings):
     global pressed_key, released_key
 
     stdscr = curses.initscr()
@@ -343,9 +381,7 @@ def run_interactive_mode(stdscr, bindings, config_file_path, dry_run):
     stdscr.addstr(3, 3, 'Buttons', curses.A_BOLD)
     stdscr.addstr(3, 8 + largest_btn, 'Keys', curses.A_BOLD)
     stdscr.refresh()
-    binding_win_manager = BindingWinManager(
-        (5, 2), bindings, config_file_path, dry_run
-    )
+    binding_win_manager = BindingWinManager((5, 2), bindings)
 
     last_esc_time = None
     canceled_binding = False
@@ -385,27 +421,54 @@ def run_interactive_mode(stdscr, bindings, config_file_path, dry_run):
         elif pressed_key in ('down', 'j'):
             binding_win_manager.move_vertically('down')
 
-    curses.flushinp()
+
+def write_bindings(bindings):
+    with open(config_file_path, 'w') as fp:
+        json.dump(bindings, fp, indent=4)
+
+
+def get_board_serial():
+    if args.port:
+        if not os.path.exists(args.port):
+            raise BoardException(
+                'The specified port could not be found.'
+            )
+        port = args.port
+    else:
+        ports = serial.tools.list_ports_linux.comports()
+        try:
+            port = [
+                port.device
+                for port in sorted(ports)
+                if port.serial_number
+            ][-1]
+        except IndexError:
+            raise BoardException(
+                'Board port could not be detected automatically.',
+                'The bindings will not be reloaded on board.',
+                'You must specify it manually with "--port" ' +
+                'or you can avoid it with "--no-reload".'
+            )
+
+    board_serial = serial.Serial(
+        port, baudrate=9600, timeout=0, parity=serial.PARITY_NONE,
+    )
+    return board_serial
+
+
+def reload_bindings():
+    global board_serial
+    if not board_serial or board_serial.closed:
+        board_serial = get_board_serial()
+    board_serial.write(b'rebind')
 
 
 def main():
-    args = arg_parser.parse_args()
-    if args.path:
-        board_path = args.path
-    else:
-        board_path = get_board_path()
-        if not board_path:
-            return
-
+    global config_file_path, args
+    board_path = args.path if args.path else get_board_path()
     write = False
     config_file_path = board_path + 'bindings.json'
     bindings = get_bindings(config_file_path)
-
-    if args.interactive:
-        custom_curses_wrapper(
-            run_interactive_mode, bindings,
-            config_file_path, args.dry_run
-        )
 
     if args.bindings:
         for button, key in args.bindings:
@@ -417,17 +480,22 @@ def main():
             bindings[button] = None
         write = True
 
-    if write and not args.dry_run:
-        with open(config_file_path, 'w') as fp:
-            json.dump(bindings, fp, indent=4)
+    if args.interactive:
+        custom_curses_wrapper(run_interactive_mode, bindings)
+
+    if not args.dry_run and (write or args.interactive):
+        write_bindings(bindings)
+        if args.reload:
+            reload_bindings()
 
     if args.list:
         print_bindings(bindings)
 
 
 def setup():
-    global OPERATING_SYSTEM, arg_parser, released_key, pressed_key
+    global OPERATING_SYSTEM, args, released_key, pressed_key, board_serial
     OPERATING_SYSTEM = platform.system()
+    board_serial = None
     pressed_key = None
     released_key = None
     arg_parser = argparse.ArgumentParser(
@@ -456,10 +524,16 @@ def setup():
     arg_parser.add_argument(
         '-r', '--remove',
         action=GetKeys,
-        nargs=1,
+        nargs='+',
         metavar='BTN',
         dest='bindings_to_remove',
         help='remove a pad button binding'
+    )
+    arg_parser.add_argument(
+        '-n', '--no-reload',
+        action='store_false',
+        dest='reload',
+        help='do not reload board bindings'
     )
     arg_parser.add_argument(
         '-l', '--list',
@@ -472,13 +546,26 @@ def setup():
         help='execute without writing on board disk'
     )
     arg_parser.add_argument(
-        '-p', '--path',
+        '-f', '--path',
         metavar='PATH',
         type=validate_path_type,
         help='specify a path to the mounted board'
     )
+    arg_parser.add_argument(
+        '-p', '--port',
+        metavar='PORT',
+        type=validate_port_type,
+        help='specify the port for the programmable board'
+    )
+    args = arg_parser.parse_args()
 
 
 if __name__ == '__main__':
     setup()
-    main()
+    try:
+        main()
+    except BoardException as e:
+        e.print()
+    finally:
+        if board_serial:
+            board_serial.close()

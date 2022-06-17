@@ -8,7 +8,7 @@ BUTTON_NAMES = {
     7: 'right',
     8: 'triangle',
     9: 'down',
-    10: 'square'
+    10: 'square',
 }
 
 HID_KEY_CODES = {

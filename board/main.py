@@ -43,15 +43,15 @@ def setup():
 
     GP_PIN_PER_BTN = {
         "select": board.GP0,
-        "start": board.GP1,
-        "cross": board.GP2,
-        "up": board.GP3,
-        "circle": board.GP4,
-        "left": board.GP5,
-        "right": board.GP6,
-        "triangle": board.GP7,
-        "down": board.GP8,
-        "square": board.GP9
+        "cross": board.GP1,
+        "left": board.GP2,
+        "triangle": board.GP3,
+        "down": board.GP4,
+        "up": board.GP5,
+        "square": board.GP6,
+        "right": board.GP7,
+        "circle": board.GP8,
+        "start": board.GP9,
     }
 
     with open('bindings.json', 'r') as fp:
@@ -69,26 +69,24 @@ def setup():
 
 
 def main():
-    blink(3)
-    blink(1, 1, 0)
-
     while True:
-        if uart.connected:
+        if uart.in_waiting:
             data = uart.read(8)
             uart.reset_input_buffer()
             if data == b'rebind':
                 reload_bindings()
-                blink(10, 0.1, 0.1)
+                blink(1, 0.1, 0.1)
 
         for pin, keycode in keyboard_pins:
             if not pin.value:
-                #  led.value = True
                 keyboard.press(keycode)
             else:
-                #  led.value = False
                 keyboard.release(keycode)
 
 
 if __name__ == '__main__':
     setup()
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(e)
