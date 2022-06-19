@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # Python
 import argparse
 import json
@@ -205,7 +207,7 @@ def run_interactive_mode(stdscr, bindings):
         pressed_key = released_key = None
 
         while not pressed_key:
-            time.sleep(0.001)
+            pass
 
         if binding_win_manager.is_binding:
             if pressed_key == 'esc':  # if esc is pressed or held
@@ -221,7 +223,7 @@ def run_interactive_mode(stdscr, bindings):
                     canceled_binding = False
                     binding_win_manager.exit_binding_mode()
                     while not released_key:
-                        time.sleep(0.001)
+                        pass
                     continue
             binding_win_manager.rebind(pressed_key)
 

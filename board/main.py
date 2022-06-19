@@ -5,6 +5,7 @@ import time
 import usb_hid
 import usb_cdc
 import json
+import os
 
 # Adafruit
 from adafruit_hid.keyboard import Keyboard
@@ -54,8 +55,15 @@ def setup():
         "start": board.GP9,
     }
 
-    with open('bindings.json', 'r') as fp:
-        data = json.load(fp)
+    BINDINGS_FILE_PATH = 'bindings.json'
+    if BINDINGS_FILE_PATH in os.listdir():
+        with open(BINDINGS_FILE_PATH, 'r') as fp:
+            data = json.load(fp)
+    else:
+        data = {
+            button: None
+            for button in GP_PIN_PER_BTN.keys()
+        }
 
     keyboard_pins = []
     for btn, keycode in data.items():
